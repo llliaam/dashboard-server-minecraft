@@ -1,0 +1,30 @@
+{
+  "server_dir": "D:/tes server",
+  "start_command": "",
+  "java_path": "java",
+  "jar_name": "server_fabric.jar",
+  "java_args": "-Xms8G -Xmx14G",
+  "stop_command": "stop",
+  "stop_timeout": 60,
+  "playit_enabled": true,
+  "playit_path": "",
+  "playit_autostart": true,
+  "schedule_enabled": true,
+  "schedule_time": "08:43",
+  "schedule_days": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "warn_minutes": [
+    5,
+    1
+  ],
+  "shutdown_pc": false,
+  "theme": "dark",
+  "console_buffer_lines": 2000
+}
