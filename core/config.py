@@ -91,11 +91,25 @@ class Config:
         return True, ""
 
     def auto_detect_from_runbat(self) -> dict:
-        """Try to extract java args and jar name from run.bat / user_jvm_args.txt."""
+        """Try to extract java args, jar name, and playit path from common locations."""
         found: dict = {}
         server_dir = Path(self.get("server_dir", ""))
         if not server_dir.is_dir():
             return found
+
+        # playit.exe — cari di lokasi umum
+        playit_candidates = [
+            server_dir / "playit.exe",
+            server_dir.parent / "playit.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "playit" / "playit.exe",
+            Path(os.environ.get("APPDATA", "")) / "playit" / "playit.exe",
+            Path("C:/playit/playit.exe"),
+            Path("C:/tools/playit.exe"),
+        ]
+        for p in playit_candidates:
+            if p.is_file():
+                found["playit_path"] = str(p)
+                break
 
         # user_jvm_args.txt (Forge 1.17+)
         jvm_file = server_dir / "user_jvm_args.txt"

@@ -7,10 +7,10 @@
   "stop_command": "stop",
   "stop_timeout": 60,
   "playit_enabled": true,
-  "playit_path": "",
+  "playit_path": "C:/Program Files/playit_gg/bin/playit.exe",
   "playit_autostart": true,
   "schedule_enabled": true,
-  "schedule_time": "08:43",
+  "schedule_time": "09:05",
   "schedule_days": [
     0,
     1,

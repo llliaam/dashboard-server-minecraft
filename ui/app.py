@@ -15,6 +15,7 @@ import customtkinter as ctk
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import Config
+from core.mod_manager import ModInfo, delete_mod, install_mod, list_mods, toggle_mod
 from core.monitor import Monitor
 from core.playit_manager import PlayitManager
 from core.properties import load as props_load
@@ -73,11 +74,12 @@ class App(ctk.CTk):
         # tabs
         self.tabs = ctk.CTkTabview(self)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=(4, 10))
-        for name in ("Console", "Players", "Scheduler", "Properties", "Settings"):
+        for name in ("Console", "Players", "Mods", "Scheduler", "Properties", "Settings"):
             self.tabs.add(name)
 
         self._build_console_tab(self.tabs.tab("Console"))
         self._build_players_tab(self.tabs.tab("Players"))
+        self._build_mods_tab(self.tabs.tab("Mods"))
         self._build_scheduler_tab(self.tabs.tab("Scheduler"))
         self._build_properties_tab(self.tabs.tab("Properties"))
         self._build_settings_tab(self.tabs.tab("Settings"))
@@ -222,6 +224,158 @@ class App(ctk.CTk):
         if n:
             self.server.whitelist_remove(n)
             self._log_ui(f"[UI] Whitelist remove: {n}")
+
+    # ── mods tab ──────────────────────────────────────────────────────────────
+
+    def _build_mods_tab(self, parent) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        # toolbar
+        bar = ctk.CTkFrame(parent, fg_color="transparent")
+        bar.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        ctk.CTkButton(bar, text="↻ Refresh", width=80, command=self._mods_refresh).pack(side="left", padx=4)
+        ctk.CTkButton(bar, text="+ Install Mod", width=110, fg_color=C_BLUE,
+                      command=self._mods_install).pack(side="left", padx=4)
+        self.lbl_mod_count = ctk.CTkLabel(bar, text="", text_color=C_GRAY)
+        self.lbl_mod_count.pack(side="left", padx=8)
+        self.lbl_mod_warning = ctk.CTkLabel(bar, text="⚠ Restart server agar perubahan berlaku",
+                                            text_color=C_ORANGE)
+        self.lbl_mod_warning.pack(side="right", padx=8)
+        self.lbl_mod_warning.pack_forget()  # hidden until a change is made
+
+        # search bar
+        search_frame = ctk.CTkFrame(parent, fg_color="transparent")
+        search_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 2))
+        search_frame.columnconfigure(1, weight=1)
+        ctk.CTkLabel(search_frame, text="Cari:", width=40).grid(row=0, column=0, padx=(4, 4))
+        self._mod_search_var = ctk.StringVar()
+        self._mod_search_var.trace_add("write", lambda *_: self._mods_apply_filter())
+        ctk.CTkEntry(search_frame, textvariable=self._mod_search_var,
+                     placeholder_text="nama mod...").grid(row=0, column=1, sticky="ew", padx=(0, 4))
+
+        # scrollable list
+        self._mods_scroll = ctk.CTkScrollableFrame(parent)
+        self._mods_scroll.grid(row=2, column=0, sticky="nsew", padx=4, pady=(0, 4))
+        self._mods_scroll.columnconfigure(0, weight=1)
+        parent.rowconfigure(2, weight=1)
+
+        self._mod_rows: list[dict] = []  # cache of rendered rows
+        self._mods_data: list[ModInfo] = []
+
+        # detail panel at bottom
+        self._mod_detail = ctk.CTkLabel(parent, text="", text_color=C_GRAY,
+                                        font=("", 11), anchor="w", wraplength=700)
+        self._mod_detail.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
+
+        self._mods_refresh()
+
+    def _mods_refresh(self) -> None:
+        d = self.config_obj.get("server_dir", "")
+        if not d:
+            self.lbl_mod_count.configure(text="Set server directory di Settings dulu.")
+            return
+        self._mods_data = list_mods(d)
+        self._mods_apply_filter()
+
+    def _mods_apply_filter(self) -> None:
+        query = self._mod_search_var.get().lower().strip()
+        visible = [m for m in self._mods_data
+                   if not query or query in m.label.lower() or query in m.mod_id.lower()]
+        self._mods_render(visible)
+        enabled = sum(1 for m in self._mods_data if m.enabled)
+        total = len(self._mods_data)
+        self.lbl_mod_count.configure(text=f"{total} mod  |  {enabled} aktif")
+
+    def _mods_render(self, mods: list[ModInfo]) -> None:
+        for w in self._mods_scroll.winfo_children():
+            w.destroy()
+        self._mod_rows.clear()
+
+        for i, mod in enumerate(mods):
+            bg = ("gray85", "gray20") if mod.enabled else ("gray80", "gray17")
+            row = ctk.CTkFrame(self._mods_scroll, fg_color=bg)
+            row.pack(fill="x", padx=4, pady=2)
+            row.columnconfigure(1, weight=1)
+
+            # toggle switch
+            var = ctk.BooleanVar(value=mod.enabled)
+            sw = ctk.CTkSwitch(row, text="", variable=var, width=48,
+                               command=lambda m=mod, v=var: self._mods_toggle(m, v))
+            sw.grid(row=0, column=0, padx=(8, 4), pady=6)
+
+            # name + version
+            lbl_name = ctk.CTkLabel(row, text=f"{mod.label}  v{mod.version}" if mod.version else mod.label,
+                                    anchor="w", font=("", 12, "bold" if mod.enabled else "normal"))
+            lbl_name.grid(row=0, column=1, sticky="w", padx=4)
+            lbl_name.bind("<Button-1>", lambda e, m=mod: self._mods_show_detail(m))
+
+            # size
+            ctk.CTkLabel(row, text=f"{mod.size_mb:.1f} MB",
+                         text_color=C_GRAY, font=("", 10)).grid(row=0, column=2, padx=8)
+
+            # delete button
+            ctk.CTkButton(row, text="🗑", width=34, fg_color="transparent",
+                          hover_color=C_RED, text_color=("gray20", "gray80"),
+                          command=lambda m=mod: self._mods_delete(m)).grid(row=0, column=3, padx=(0, 6))
+
+            self._mod_rows.append({"mod": mod, "var": var, "row": row})
+
+    def _mods_toggle(self, mod: ModInfo, var: ctk.BooleanVar) -> None:
+        d = self.config_obj.get("server_dir", "")
+        try:
+            updated = toggle_mod(d, mod)
+            # update in-place in _mods_data
+            for i, m in enumerate(self._mods_data):
+                if m.filename == mod.filename:
+                    self._mods_data[i] = updated
+                    break
+            self.lbl_mod_warning.pack(side="right", padx=8)
+            self._mods_apply_filter()
+        except OSError as e:
+            messagebox.showerror("Toggle Mod", f"Gagal: {e}")
+            var.set(mod.enabled)  # revert switch
+
+    def _mods_delete(self, mod: ModInfo) -> None:
+        if not messagebox.askyesno("Hapus Mod", f"Hapus '{mod.label}'?\nIni permanen."):
+            return
+        d = self.config_obj.get("server_dir", "")
+        try:
+            delete_mod(d, mod)
+            self._mods_data = [m for m in self._mods_data if m.filename != mod.filename]
+            self.lbl_mod_warning.pack(side="right", padx=8)
+            self._mods_apply_filter()
+            self._mod_detail.configure(text="")
+        except OSError as e:
+            messagebox.showerror("Hapus Mod", f"Gagal: {e}")
+
+    def _mods_install(self) -> None:
+        d = self.config_obj.get("server_dir", "")
+        if not d:
+            messagebox.showwarning("Install Mod", "Set server directory di Settings dulu.")
+            return
+        paths = filedialog.askopenfilenames(
+            title="Pilih file mod (.jar)",
+            filetypes=[("JAR files", "*.jar"), ("All files", "*.*")],
+        )
+        if not paths:
+            return
+        results = []
+        for p in paths:
+            ok, msg = install_mod(d, p)
+            results.append(msg)
+        messagebox.showinfo("Install Mod", "\n".join(results))
+        self.lbl_mod_warning.pack(side="right", padx=8)
+        self._mods_refresh()
+
+    def _mods_show_detail(self, mod: ModInfo) -> None:
+        parts = []
+        if mod.mod_id:
+            parts.append(f"ID: {mod.mod_id}")
+        if mod.description:
+            parts.append(f"Desc: {mod.description}")
+        parts.append(f"File: {mod.filename}")
+        self._mod_detail.configure(text="  |  ".join(parts))
 
     # ── scheduler tab ─────────────────────────────────────────────────────────
 
