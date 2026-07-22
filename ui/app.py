@@ -17,6 +17,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.config import Config
 from core.mod_manager import ModInfo, delete_mod, install_mod, list_mods, toggle_mod
 from core.monitor import Monitor
+from core.world_manager import (
+    DatapackInfo, WorldInfo,
+    backup_world, delete_datapack, delete_world,
+    install_datapack, list_backups, list_datapacks,
+    list_worlds, toggle_datapack,
+)
 from core.playit_manager import PlayitManager
 from core.properties import load as props_load
 from core.properties import save as props_save
@@ -74,12 +80,13 @@ class App(ctk.CTk):
         # tabs
         self.tabs = ctk.CTkTabview(self)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=(4, 10))
-        for name in ("Console", "Players", "Mods", "Scheduler", "Properties", "Settings"):
+        for name in ("Console", "Players", "Mods", "Worlds", "Scheduler", "Properties", "Settings"):
             self.tabs.add(name)
 
         self._build_console_tab(self.tabs.tab("Console"))
         self._build_players_tab(self.tabs.tab("Players"))
         self._build_mods_tab(self.tabs.tab("Mods"))
+        self._build_worlds_tab(self.tabs.tab("Worlds"))
         self._build_scheduler_tab(self.tabs.tab("Scheduler"))
         self._build_properties_tab(self.tabs.tab("Properties"))
         self._build_settings_tab(self.tabs.tab("Settings"))
@@ -376,6 +383,296 @@ class App(ctk.CTk):
             parts.append(f"Desc: {mod.description}")
         parts.append(f"File: {mod.filename}")
         self._mod_detail.configure(text="  |  ".join(parts))
+
+    # ── worlds tab ────────────────────────────────────────────────────────────
+
+    def _build_worlds_tab(self, parent) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.columnconfigure(1, weight=1)
+        parent.rowconfigure(1, weight=1)
+
+        # ── left: world list ──────────────────────────────────────────────────
+        left = ctk.CTkFrame(parent)
+        left.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(4, 2), pady=4)
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(1, weight=1)
+
+        lbar = ctk.CTkFrame(left, fg_color="transparent")
+        lbar.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        ctk.CTkLabel(lbar, text="Worlds", font=("", 13, "bold")).pack(side="left", padx=4)
+        ctk.CTkButton(lbar, text="↻", width=32, command=self._worlds_refresh).pack(side="left", padx=2)
+
+        self._world_scroll = ctk.CTkScrollableFrame(left)
+        self._world_scroll.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
+        self._world_scroll.columnconfigure(0, weight=1)
+
+        self._worlds_data: list[WorldInfo] = []
+        self._selected_world: WorldInfo | None = None
+
+        # ── right: detail + datapacks + backups ──────────────────────────────
+        right = ctk.CTkFrame(parent)
+        right.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(2, 4), pady=4)
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(3, weight=1)
+
+        self._lbl_world_title = ctk.CTkLabel(right, text="Pilih world di kiri",
+                                             font=("", 13, "bold"))
+        self._lbl_world_title.grid(row=0, column=0, sticky="w", padx=10, pady=(8, 2))
+
+        self._lbl_world_info = ctk.CTkLabel(right, text="", text_color=C_GRAY,
+                                            font=("", 11), anchor="w")
+        self._lbl_world_info.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 4))
+
+        # world action buttons
+        wact = ctk.CTkFrame(right, fg_color="transparent")
+        wact.grid(row=2, column=0, sticky="ew", padx=6, pady=(0, 6))
+        self._btn_world_backup = ctk.CTkButton(wact, text="💾 Backup", width=100,
+                                               fg_color=C_BLUE, state="disabled",
+                                               command=self._world_backup)
+        self._btn_world_backup.pack(side="left", padx=4)
+        self._btn_world_activate = ctk.CTkButton(wact, text="✓ Set Aktif", width=100,
+                                                  fg_color=C_GREEN, hover_color="#388e3c",
+                                                  state="disabled",
+                                                  command=self._world_set_active)
+        self._btn_world_activate.pack(side="left", padx=4)
+        self._btn_world_delete = ctk.CTkButton(wact, text="🗑 Hapus", width=90,
+                                               fg_color=C_RED, hover_color="#c62828",
+                                               state="disabled",
+                                               command=self._world_delete)
+        self._btn_world_delete.pack(side="left", padx=4)
+
+        # datapacks sub-section
+        ctk.CTkLabel(right, text="Datapacks", font=("", 12, "bold")).grid(
+            row=3, column=0, sticky="w", padx=10, pady=(4, 0))
+
+        dpbar = ctk.CTkFrame(right, fg_color="transparent")
+        dpbar.grid(row=4, column=0, sticky="ew", padx=6, pady=(2, 2))
+        ctk.CTkButton(dpbar, text="↻ Refresh", width=80,
+                      command=self._dp_refresh).pack(side="left", padx=4)
+        ctk.CTkButton(dpbar, text="+ Install .zip", width=100, fg_color=C_BLUE,
+                      command=self._dp_install).pack(side="left", padx=4)
+        ctk.CTkButton(dpbar, text="⟳ /reload", width=90, fg_color=C_ORANGE,
+                      command=self._dp_reload).pack(side="left", padx=4)
+
+        self._dp_scroll = ctk.CTkScrollableFrame(right, height=160)
+        self._dp_scroll.grid(row=5, column=0, sticky="ew", padx=4, pady=(0, 4))
+        self._dp_scroll.columnconfigure(0, weight=1)
+        right.rowconfigure(5, weight=1)
+
+        # backups sub-section
+        ctk.CTkLabel(right, text="Backups", font=("", 12, "bold")).grid(
+            row=6, column=0, sticky="w", padx=10, pady=(4, 0))
+        self._backup_scroll = ctk.CTkScrollableFrame(right, height=120)
+        self._backup_scroll.grid(row=7, column=0, sticky="ew", padx=4, pady=(2, 6))
+        self._backup_scroll.columnconfigure(0, weight=1)
+
+        self._worlds_refresh()
+
+    # ── world helpers ─────────────────────────────────────────────────────────
+
+    def _active_world_name(self) -> str:
+        from core.properties import load as _pload
+        d = self.config_obj.get("server_dir", "")
+        if not d:
+            return ""
+        props = _pload(d)
+        return props.get("level-name", "world")
+
+    def _worlds_refresh(self) -> None:
+        d = self.config_obj.get("server_dir", "")
+        if not d:
+            return
+        active = self._active_world_name()
+        self._worlds_data = list_worlds(d, active)
+        self._render_world_list()
+        self._backups_refresh()
+
+    def _render_world_list(self) -> None:
+        for w in self._world_scroll.winfo_children():
+            w.destroy()
+        for world in self._worlds_data:
+            bg = ("gray78", "gray25") if world.active else ("gray85", "gray20")
+            row = ctk.CTkFrame(self._world_scroll, fg_color=bg, cursor="hand2")
+            row.pack(fill="x", padx=4, pady=2)
+            row.columnconfigure(0, weight=1)
+            label = f"{'★ ' if world.active else '  '}{world.name}"
+            ctk.CTkLabel(row, text=label, anchor="w",
+                         font=("", 12, "bold" if world.active else "normal")).grid(
+                row=0, column=0, sticky="w", padx=8, pady=4)
+            ctk.CTkLabel(row, text=f"{world.size_mb:.1f} MB",
+                         text_color=C_GRAY, font=("", 10)).grid(row=0, column=1, padx=8)
+            row.bind("<Button-1>", lambda e, ww=world: self._world_select(ww))
+            for child in row.winfo_children():
+                child.bind("<Button-1>", lambda e, ww=world: self._world_select(ww))
+
+    def _world_select(self, world: WorldInfo) -> None:
+        self._selected_world = world
+        self._lbl_world_title.configure(text=f"{'[AKTIF] ' if world.active else ''}{world.name}")
+        dims = []
+        if world.has_nether:
+            dims.append("Nether")
+        if world.has_end:
+            dims.append("The End")
+        dim_str = ", ".join(dims) if dims else "Overworld only"
+        self._lbl_world_info.configure(
+            text=f"Ukuran: {world.size_mb:.1f} MB  |  Dimensi: {dim_str}")
+        self._btn_world_backup.configure(state="normal")
+        self._btn_world_delete.configure(
+            state="disabled" if world.active else "normal")
+        self._btn_world_activate.configure(
+            state="disabled" if world.active else "normal")
+        self._dp_refresh()
+
+    def _world_backup(self) -> None:
+        if not self._selected_world:
+            return
+        d = self.config_obj.get("server_dir", "")
+        if self.server.is_running:
+            self.server.send_command("save-all")
+            import time; time.sleep(1)
+        ok, msg = backup_world(d, self._selected_world.name)
+        messagebox.showinfo("Backup World", msg)
+        self._backups_refresh()
+
+    def _world_set_active(self) -> None:
+        if not self._selected_world:
+            return
+        if self.server.is_running:
+            messagebox.showwarning("Set Aktif", "Stop server dulu sebelum mengganti world aktif.")
+            return
+        from core.properties import load as _pload, save as _psave
+        d = self.config_obj.get("server_dir", "")
+        props = _pload(d)
+        props["level-name"] = self._selected_world.name
+        _psave(d, props)
+        messagebox.showinfo("Set Aktif", f"World aktif diubah ke '{self._selected_world.name}'.\nStart server untuk berlaku.")
+        self._worlds_refresh()
+
+    def _world_delete(self) -> None:
+        if not self._selected_world:
+            return
+        if self._selected_world.active:
+            messagebox.showerror("Hapus World", "Tidak bisa menghapus world yang sedang aktif.")
+            return
+        if self.server.is_running:
+            messagebox.showwarning("Hapus World", "Stop server dulu sebelum menghapus world.")
+            return
+        name = self._selected_world.name
+        if not messagebox.askyesno("Hapus World",
+                                   f"Hapus world '{name}' beserta Nether & The End-nya?\n"
+                                   f"⚠ Ini PERMANEN dan tidak bisa dibatalkan!"):
+            return
+        d = self.config_obj.get("server_dir", "")
+        ok, msg = delete_world(d, name)
+        messagebox.showinfo("Hapus World", msg)
+        self._selected_world = None
+        self._lbl_world_title.configure(text="Pilih world di kiri")
+        self._lbl_world_info.configure(text="")
+        for btn in (self._btn_world_backup, self._btn_world_activate, self._btn_world_delete):
+            btn.configure(state="disabled")
+        self._worlds_refresh()
+
+    # ── datapack helpers ──────────────────────────────────────────────────────
+
+    def _dp_refresh(self) -> None:
+        for w in self._dp_scroll.winfo_children():
+            w.destroy()
+        if not self._selected_world:
+            return
+        d = self.config_obj.get("server_dir", "")
+        packs = list_datapacks(d, self._selected_world.name)
+        if not packs:
+            ctk.CTkLabel(self._dp_scroll, text="Tidak ada datapack.",
+                         text_color=C_GRAY).pack(anchor="w", padx=8)
+            return
+        for dp in packs:
+            bg = ("gray85", "gray20") if dp.enabled else ("gray80", "gray17")
+            row = ctk.CTkFrame(self._dp_scroll, fg_color=bg)
+            row.pack(fill="x", padx=2, pady=1)
+            row.columnconfigure(1, weight=1)
+
+            if dp.is_zip:
+                var = ctk.BooleanVar(value=dp.enabled)
+                sw = ctk.CTkSwitch(row, text="", variable=var, width=48,
+                                   command=lambda p=dp, v=var: self._dp_toggle(p, v))
+                sw.grid(row=0, column=0, padx=(6, 2), pady=4)
+            else:
+                ctk.CTkLabel(row, text="📁", width=48).grid(row=0, column=0, padx=6)
+
+            ctk.CTkLabel(row, text=dp.display_name, anchor="w").grid(
+                row=0, column=1, sticky="w", padx=4)
+            ctk.CTkLabel(row, text=f"{dp.size_mb:.2f} MB",
+                         text_color=C_GRAY, font=("", 10)).grid(row=0, column=2, padx=6)
+            ctk.CTkButton(row, text="🗑", width=34, fg_color="transparent",
+                          hover_color=C_RED, text_color=("gray20", "gray80"),
+                          command=lambda p=dp: self._dp_delete(p)).grid(
+                row=0, column=3, padx=(0, 4))
+
+    def _dp_toggle(self, dp: DatapackInfo, var: ctk.BooleanVar) -> None:
+        d = self.config_obj.get("server_dir", "")
+        try:
+            toggle_datapack(d, self._selected_world.name, dp)
+            self._dp_refresh()
+        except Exception as e:
+            messagebox.showerror("Toggle Datapack", str(e))
+            var.set(dp.enabled)
+
+    def _dp_install(self) -> None:
+        if not self._selected_world:
+            messagebox.showwarning("Install Datapack", "Pilih world dulu.")
+            return
+        paths = filedialog.askopenfilenames(
+            title="Pilih datapack (.zip)",
+            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")],
+        )
+        if not paths:
+            return
+        d = self.config_obj.get("server_dir", "")
+        results = []
+        for p in paths:
+            ok, msg = install_datapack(d, self._selected_world.name, p)
+            results.append(msg)
+        messagebox.showinfo("Install Datapack", "\n".join(results))
+        self._dp_refresh()
+
+    def _dp_delete(self, dp: DatapackInfo) -> None:
+        if not messagebox.askyesno("Hapus Datapack", f"Hapus '{dp.display_name}'?"):
+            return
+        d = self.config_obj.get("server_dir", "")
+        try:
+            delete_datapack(d, self._selected_world.name, dp)
+            self._dp_refresh()
+        except Exception as e:
+            messagebox.showerror("Hapus Datapack", str(e))
+
+    def _dp_reload(self) -> None:
+        if not self.server.is_running:
+            messagebox.showwarning("/reload", "Server tidak berjalan.")
+            return
+        self.server.send_command("reload")
+        self._log_ui("[UI] /reload dikirim ke server.")
+
+    # ── backup list ───────────────────────────────────────────────────────────
+
+    def _backups_refresh(self) -> None:
+        for w in self._backup_scroll.winfo_children():
+            w.destroy()
+        d = self.config_obj.get("server_dir", "")
+        if not d:
+            return
+        backups = list_backups(d)
+        if not backups:
+            ctk.CTkLabel(self._backup_scroll, text="Belum ada backup.",
+                         text_color=C_GRAY).pack(anchor="w", padx=8)
+            return
+        for b in backups:
+            row = ctk.CTkFrame(self._backup_scroll, fg_color=("gray85", "gray20"))
+            row.pack(fill="x", padx=2, pady=1)
+            row.columnconfigure(0, weight=1)
+            ctk.CTkLabel(row, text=b["name"], anchor="w", font=("Consolas", 11)).grid(
+                row=0, column=0, sticky="w", padx=8, pady=3)
+            ctk.CTkLabel(row, text=f"{b['size_mb']:.1f} MB  {b['mtime']}",
+                         text_color=C_GRAY, font=("", 10)).grid(row=0, column=1, padx=8)
 
     # ── scheduler tab ─────────────────────────────────────────────────────────
 
